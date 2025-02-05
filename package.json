@@ -7,9 +7,9 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
+    "lint": "next lint",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d .next",
-    "lint": "next lint"
+    "deploy": "gh-pages -d .next"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.1.1",
