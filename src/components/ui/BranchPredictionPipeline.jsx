@@ -1,342 +1,381 @@
-import React, { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Button } from '@/components/ui/button';
-import { Play, Pause, SkipForward, RotateCcw, Sun, Moon, Check, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { AlertCircle, CheckCircle2 } from 'lucide-react';
 
-const PipelineStages = ['IF', 'ID', 'EX', 'MEM', 'WB'];
+const PipelineVisualizer = () => {
+  // State for the current predictor type
+  const [predictorType, setPredictorType] = useState('one-bit');
+  
+  // State for one-bit predictor
+  const [oneBitState, setOneBitState] = useState('NT');
+  
+  // State for two-bit predictor
+  const [twoBitState, setTwoBitState] = useState('00');
+  
+  // Sample instruction sequence demonstrating branch prediction patterns
+  const [instructions] = useState([
+    // Loop initialization
+    { id: 1, type: 'add', text: 'add r1, r0, #5', comment: 'Initialize loop counter' },
+    
+    // First iteration - Loop will be taken 4 times (T,T,T,T)
+    { id: 2, type: 'add', text: 'LOOP: add r2, r2, r3', comment: 'Loop body' },
+    { id: 3, type: 'sub', text: 'sub r1, r1, #1', comment: 'Decrement counter' },
+    { id: 4, type: 'branch', text: 'bne r1, r0, LOOP', actual: 'T', comment: 'First branch: Taken', dependsOn: [3] },
+    
+    // Second iteration
+    { id: 5, type: 'add', text: 'add r2, r2, r3', comment: 'Loop iteration 2' },
+    { id: 6, type: 'sub', text: 'sub r1, r1, #1', comment: 'Decrement counter' },
+    { id: 7, type: 'branch', text: 'bne r1, r0, LOOP', actual: 'T', comment: 'Second branch: Taken', dependsOn: [6] },
+    
+    // Third iteration
+    { id: 8, type: 'add', text: 'add r2, r2, r3', comment: 'Loop iteration 3' },
+    { id: 9, type: 'sub', text: 'sub r1, r1, #1', comment: 'Decrement counter' },
+    { id: 10, type: 'branch', text: 'bne r1, r0, LOOP', actual: 'T', comment: 'Third branch: Taken', dependsOn: [9] },
+    
+    // Fourth iteration
+    { id: 11, type: 'add', text: 'add r2, r2, r3', comment: 'Loop iteration 4' },
+    { id: 12, type: 'sub', text: 'sub r1, r1, #1', comment: 'Decrement counter' },
+    { id: 13, type: 'branch', text: 'bne r1, r0, LOOP', actual: 'T', comment: 'Fourth branch: Taken', dependsOn: [12] },
+    
+    // Final iteration - Loop exits (NT)
+    { id: 14, type: 'add', text: 'add r2, r2, r3', comment: 'Final iteration' },
+    { id: 15, type: 'sub', text: 'sub r1, r1, #1', comment: 'Counter reaches zero' },
+    { id: 16, type: 'branch', text: 'bne r1, r0, LOOP', actual: 'NT', comment: 'Final branch: Not Taken', dependsOn: [15] },
+    
+    // Post-loop instruction
+    { id: 17, type: 'add', text: 'add r4, r2, r0', comment: 'Post-loop operation' }
+  ]);
+  
+  // Current cycle and pipeline state
+  const [currentCycle, setCurrentCycle] = useState(1);
+  const [maxCycle, setMaxCycle] = useState(1);
+  const [pipelineState, setPipelineState] = useState(new Map());
+  const [stallState, setStallState] = useState(new Map());
+  
+  // Statistics
+  const [stats, setStats] = useState({
+    correct: 0,
+    incorrect: 0,
+    dataStalls: 0,
+    branchStalls: 0
+  });
 
-const sampleProgram = [
-    { id: 1, instruction: 'ADD R1, R2, R3', type: 'alu', cycles: 1 },
-    { id: 2, instruction: 'BEQ R1, R0, LABEL1', type: 'branch', cycles: 1, target: 5 },
-    { id: 3, instruction: 'SUB R4, R5, R6', type: 'alu', cycles: 1 },
-    { id: 4, instruction: 'MUL R7, R8, R9', type: 'alu', cycles: 1 },
-    { id: 5, instruction: 'LABEL1: ADD R10, R11, R12', type: 'alu', cycles: 1 },
-    { id: 6, instruction: 'BNE R4, R0, LABEL2', type: 'branch', cycles: 1, target: 8 },
-    { id: 7, instruction: 'DIV R13, R14, R15', type: 'alu', cycles: 1 },
-    { id: 8, instruction: 'LABEL2: SUB R16, R17, R18', type: 'alu', cycles: 1 }
-];
-
-
-const BranchPredictionPipeline = () => {
-    const [predictionType, setPredictionType] = useState('one-bit');
-    const [currentCycle, setCurrentCycle] = useState(0);
-    const [executionHistory, setExecutionHistory] = useState(
-        Array(sampleProgram.length).fill().map(() => Array(30).fill(''))
-    );
-    const [predictionHistory, setPredictionHistory] = useState([]);
-    const [isRunning, setIsRunning] = useState(false);
-    const [isDarkMode, setIsDarkMode] = useState(false);
-    const [predictorState, setPredictorState] = useState({
-        oneBit: 'NT',
-        twoBit: 'SNT'
+  // Check if all instructions have completed
+  const isExecutionComplete = () => {
+    return instructions.every(inst => {
+      const state = pipelineState.get(inst.id);
+      return state && state.W; // Check if instruction has completed writeback
     });
-    const [isLastInstructionFinished, setIsLastInstructionFinished] = useState(false);
-    const [mispredictionStalls, setMispredictionStalls] = useState({});
+  };
 
-    const branchOutcomes = {
-        2: { taken: true, actualTarget: 5 },
-        6: { taken: false, actualTarget: 8 }
-    };
+  // Get prediction based on current state
+  const getPrediction = () => predictorType === 'one-bit' ? oneBitState : twoBitState.startsWith('1') ? 'T' : 'NT';
 
+  // Update predictor state based on actual outcome
+  const updateState = (actual) => {
+    if (predictorType === 'one-bit') {
+      setOneBitState(actual);
+    } else {
+      const currentVal = parseInt(twoBitState, 2);
+      let newVal = actual === 'T' ? Math.min(currentVal + 1, 3) : Math.max(currentVal - 1, 0);
+      setTwoBitState(newVal.toString(2).padStart(2, '0'));
+    }
+  };
 
-    const themeClasses = {
-        container: isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black',
-        card: isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white',
-        table: {
-            header: isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200',
-            cell: isDarkMode ? 'border-gray-700' : 'border-gray-200',
-            branchRow: isDarkMode ? 'bg-blue-900/20' : 'bg-blue-50',
-            stall: isDarkMode ? 'bg-red-900/20 text-red-300' : 'bg-red-100 text-red-700',
-            misprediction: isDarkMode ? 'bg-yellow-900/20 text-yellow-300' : 'bg-yellow-100 text-yellow-700'
-        }
-    };
+  // Check for data hazards
+  const hasDataHazard = (inst, cycle) => {
+    if (!inst.dependsOn) return false;
+    
+    return inst.dependsOn.some(depId => {
+      const depInst = pipelineState.get(depId);
+      return depInst && !depInst.W && depInst.F < cycle;
+    });
+  };
 
-    const getPrediction = (branchId) => {
-        if (predictionType === 'one-bit') {
-            return predictorState.oneBit === 'T';
-        }
-        return ['WT', 'ST'].includes(predictorState.twoBit);
-    };
+  // Step one cycle
+  const step = () => {
+    // Don't proceed if all instructions have completed
+    if (isExecutionComplete()) return;
 
-   const updatePipeline = () => {
-        if (currentCycle >= 30) {
-            setIsRunning(false);
-            return;
-        };
+    let newPipelineState = new Map(pipelineState);
+    let newStallState = new Map(stallState);
+    let newDataStalls = 0;
+    let newBranchStalls = 0;
 
-        const newHistory = executionHistory.map(row => [...row]);
-        const newPredictions = [...predictionHistory];
-        let stallCycle = -1;
-        let newStalls = { ...mispredictionStalls };
+    // Process each instruction
+    instructions.forEach((inst, index) => {
+      const instState = newPipelineState.get(inst.id) || {};
+      const stallInfo = newStallState.get(inst.id) || {};
 
-        // Check for branches in current cycle
-        const currentInst = sampleProgram[currentCycle];
-        if (currentInst?.type === 'branch') {
-            const prediction = getPrediction(currentInst.id);
-            const actual = branchOutcomes[currentInst.id]?.taken;
-
-            newPredictions.push({
-                cycle: currentCycle,
-                instruction: currentInst.id,
-                predicted: prediction ? 'T' : 'NT',
-                actual: actual ? 'T' : 'NT',
-                correct: prediction === actual
-            });
-        }
-
-
-        // Handle stalls from mispredictions
-        for (let i = 0; i < sampleProgram.length; i++) {
-            const inst = sampleProgram[i];
-            if (inst.type === 'branch') {
-                const predicted = getPrediction(inst.id);
-                const actual = branchOutcomes[inst.id]?.taken;
-                const executionStart = i;
-
-
-                 if (actual !== undefined && predicted !== actual) {
-                    if (currentCycle >= executionStart + 2 && currentCycle <= executionStart + 4) {
-                        stallCycle = i;
-                         for (let j = i + 1; j < sampleProgram.length; j++) {
-                            const stallStart = currentCycle + 1;
-                            const stallEnd = currentCycle + 3;
-
-                              for (let k = stallStart; k <= stallEnd; k++) {
-                                if(k - (j - i) < 30 && k - (j-i) >= 0)
-                                 newStalls[j] = newStalls[j] ? [...newStalls[j], k - (j - i)] : [k - (j - i)];
-                            }
-                        }
-                   }
-                }
-            }
-        }
-
-
-        // Update pipeline stages
-      for (let i = 0; i < sampleProgram.length; i++) {
-        if (i <= currentCycle) {
-             let stage = currentCycle - i;
-            if (stage < PipelineStages.length) {
-                 if (stallCycle !== -1 && i > stallCycle) {
-                       newHistory[i][currentCycle] = 'STALL';
-                    }
-                     else if(!mispredictionStalls[i]?.includes(currentCycle)) {
-                       newHistory[i][currentCycle] = PipelineStages[stage];
-                  }else{
-                     newHistory[i][currentCycle] = 'STALL';
-                  }
-             } else if(stage >= PipelineStages.length && stage < 30) {
-                newHistory[i][currentCycle] = 'DONE';
-            }
-          }
+      // Check if instruction can start
+      if (!instState.F && canStartInstruction(index, newPipelineState)) {
+        instState.F = currentCycle;
       }
 
-
-        setMispredictionStalls(newStalls);
-        setExecutionHistory(newHistory);
-        setPredictionHistory(newPredictions);
-        setCurrentCycle(prev => prev + 1);
-
-
-        // Update predictor state
-      if (currentInst?.type === 'branch') {
-        const outcome = branchOutcomes[currentInst.id];
-           if (outcome) {
-                if (predictionType === 'one-bit') {
-                    setPredictorState(prev => ({
-                        ...prev,
-                        oneBit: outcome.taken ? 'T' : 'NT'
-                   }));
-                } else {
-                  const transitions = {
-                      SNT: outcome.taken ? 'WNT' : 'SNT',
-                       WNT: outcome.taken ? 'WT' : 'SNT',
-                       WT: outcome.taken ? 'ST' : 'WNT',
-                       ST: outcome.taken ? 'ST' : 'WT'
-                  };
-                   setPredictorState(prev => ({
-                        ...prev,
-                       twoBit: transitions[prev.twoBit]
-                   }));
-                }
-           }
-        }
-       if(currentCycle === sampleProgram.length + 5 ) setIsLastInstructionFinished(true)
-    };
-
-     const reset = () => {
-        setCurrentCycle(0);
-        setExecutionHistory(Array(sampleProgram.length).fill().map(() => Array(30).fill('')));
-        setPredictionHistory([]);
-        setIsRunning(false);
-        setPredictorState({
-            oneBit: 'NT',
-            twoBit: 'SNT'
-        });
-       setIsLastInstructionFinished(false);
-        setMispredictionStalls({});
-    };
-
-
-    useEffect(() => {
-        let intervalId;
-
-        if (isRunning && !isLastInstructionFinished) {
-             intervalId = setInterval(() => {
-                updatePipeline();
-            }, 500);
-        } else {
-            clearInterval(intervalId);
+      // If instruction has started, process through pipeline
+      if (instState.F) {
+        // Check for data hazards before decode
+        if (!instState.D && instState.F < currentCycle) {
+          if (hasDataHazard(inst, currentCycle)) {
+            stallInfo[currentCycle] = 'D'; // Data hazard stall
+            newDataStalls++;
+          } else {
+            instState.D = currentCycle;
+          }
         }
 
-       return () => clearInterval(intervalId);
-    }, [isRunning, currentCycle, isLastInstructionFinished]);
+        // Progress through other stages
+        if (!instState.E && instState.D && instState.D < currentCycle) {
+          instState.E = currentCycle;
+        }
+        if (!instState.M && instState.E && instState.E < currentCycle) {
+          instState.M = currentCycle;
+        }
+        if (!instState.W && instState.M && instState.M < currentCycle) {
+          instState.W = currentCycle;
+        }
 
+        // Handle branch misprediction
+        if (inst.type === 'branch' && instState.E === currentCycle) {
+          const prediction = getPrediction();
+          const correct = prediction === inst.actual;
 
-    const handleStartPause = () => {
-       setIsRunning(!isRunning);
-    };
+          if (!correct) {
+            // Mark branch stalls
+            stallInfo[currentCycle + 1] = 'B';
+            stallInfo[currentCycle + 2] = 'B';
+            newBranchStalls += 2;
+            
+            // Flush pipeline
+            flushPipeline(index, newPipelineState);
+          }
 
+          updateState(inst.actual);
+          setStats(prev => ({
+            ...prev,
+            correct: prev.correct + (correct ? 1 : 0),
+            incorrect: prev.incorrect + (correct ? 0 : 1)
+          }));
+        }
+      }
 
-    return (
-        <div className={`w-full max-w-6xl mx-auto p-4 transition-colors duration-200 ${themeClasses.container}`}>
-            <Card className={themeClasses.card}>
-                <CardHeader className="flex flex-row items-center justify-between">
-                    <CardTitle>Pipeline Execution with Branch Prediction</CardTitle>
-                    <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={() => setIsDarkMode(!isDarkMode)}
-                        className={themeClasses.button}
-                   >
-                        {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                    </Button>
-               </CardHeader>
-                <CardContent>
-                    <Tabs defaultValue="one-bit" onValueChange={setPredictionType}>
-                        <TabsList className="mb-4">
-                            <TabsTrigger value="one-bit">One-Bit Predictor</TabsTrigger>
-                            <TabsTrigger value="two-bit">Two-Bit Predictor</TabsTrigger>
-                        </TabsList>
-                    </Tabs>
-                  <div className="flex gap-4 mb-4">
-                        <Button onClick={handleStartPause} className="flex items-center gap-2">
-                           {isRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                           {isRunning ? 'Pause' : 'Start'}
-                        </Button>
-                        <Button
-                            onClick={updatePipeline}
-                            className="flex items-center gap-2"
-                           disabled={isRunning}
-                       >
-                            <SkipForward className="w-4 h-4" /> Step
-                        </Button>
-                        <Button onClick={reset} variant="outline" className="flex items-center gap-2" disabled={isRunning}>
-                            <RotateCcw className="w-4 h-4" /> Reset
-                        </Button>
-                  </div>
+      newPipelineState.set(inst.id, instState);
+      newStallState.set(inst.id, stallInfo);
+    });
 
+    setPipelineState(newPipelineState);
+    setStallState(newStallState);
+    setCurrentCycle(prev => prev + 1);
+    setMaxCycle(prev => Math.max(prev, currentCycle + 1));
+    
+    setStats(prev => ({
+      ...prev,
+      dataStalls: prev.dataStalls + newDataStalls,
+      branchStalls: prev.branchStalls + newBranchStalls
+    }));
+  };
 
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-                        <div className="lg:col-span-2 overflow-x-auto">
-                            <table className="w-full border-collapse">
-                                <thead className={themeClasses.table.header}>
-                                    <tr>
-                                        <th className={`border p-2 text-left ${themeClasses.table.cell}`}>Instruction</th>
-                                        {Array.from({ length: 30 }, (_, i) => (
-                                            <th key={i} className={`border p-2 text-center ${themeClasses.table.cell}`}>
-                                                Cycle {i + 1}
-                                           </th>
-                                        ))}
-                                   </tr>
-                                </thead>
-                                <tbody>
-                                    {sampleProgram.map((inst, idx) => (
-                                        <tr key={inst.id} className={inst.type === 'branch' ? themeClasses.table.branchRow : ''}>
-                                            <td className={`border p-2 font-mono ${themeClasses.table.cell}`}>
-                                                {inst.instruction}
-                                            </td>
-                                            {executionHistory[idx].map((stage, cycleIdx) => (
-                                                <td
-                                                    key={cycleIdx}
-                                                    className={`border p-2 text-center ${themeClasses.table.cell} ${
-                                                      mispredictionStalls[idx]?.includes(cycleIdx) ? themeClasses.table.misprediction : ''
-                                                    } ${
-                                                        stage === 'STALL' ? themeClasses.table.stall : ''
-                                                    }`}
-                                                >
-                                                    {stage}
-                                                </td>
-                                            ))}
-                                       </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                        <div className="lg:col-span-1">
-                            <div className="border rounded p-4 mb-4">
-                                <h3 className="font-semibold mb-2">Branch Prediction History</h3>
-                                <div className="space-y-2">
-                                    {predictionHistory.map((pred, idx) => (
-                                        <div key={idx} className={`p-2 rounded flex items-center justify-between ${
-                                           pred.correct ?
-                                                (isDarkMode ? 'bg-green-900/20 text-green-300' : 'bg-green-100 text-green-700') :
-                                               themeClasses.table.misprediction
-                                        }`}>
-                                            <span>Cycle {pred.cycle}: Branch {pred.instruction}</span>
-                                            <div className="flex items-center gap-2">
-                                                <span>P: {pred.predicted}</span>
-                                                <span>A: {pred.actual}</span>
-                                                {pred.correct ?
-                                                    <Check className="w-4 h-4 text-green-500" /> :
-                                                    <X className="w-4 h-4 text-red-500" />
-                                                }
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                           </div>
+  // Helper to check if an instruction can start
+  const canStartInstruction = (index, state) => {
+    if (index === 0) return true;
+    const prevInst = instructions[index - 1];
+    const prevState = state.get(prevInst.id);
+    return prevState && prevState.D;
+  };
 
-                            <div className="border rounded p-4">
-                                <h3 className="font-semibold mb-2">Current Predictor State:</h3>
-                                <div className="space-y-2">
-                                    <div className={`p-2 rounded ${
-                                        predictionType === 'one-bit'
-                                            ? (isDarkMode ? 'bg-blue-900/30' : 'bg-blue-100')
-                                            : (isDarkMode ? 'bg-gray-700' : 'bg-gray-100')
-                                    }`}>
-                                        One-bit: {predictorState.oneBit}
-                                    </div>
-                                    <div className={`p-2 rounded ${
-                                        predictionType === 'two-bit'
-                                            ? (isDarkMode ? 'bg-blue-900/30' : 'bg-blue-100')
-                                            : (isDarkMode ? 'bg-gray-700' : 'bg-gray-100')
-                                    }`}>
-                                        Two-bit: {predictorState.twoBit}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="border rounded p-4 mt-4">
-                                <h3 className="font-semibold mb-2">Statistics:</h3>
-                                <div className="space-y-1">
-                                    <p>Current Cycle: {currentCycle}</p>
-                                    <p>Branch Instructions: {Object.keys(branchOutcomes).length}</p>
-                                    <p>Pipeline Stalls: {executionHistory.flat().filter(stage => stage === 'STALL').length}</p>
-                                    <p>Mispredictions: {predictionHistory.filter(p => !p.correct).length}</p>
-                                     <p>Prediction Accuracy: {
-                                         predictionHistory.length > 0
-                                           ? `${((predictionHistory.filter(p => p.correct).length / predictionHistory.length) * 100).toFixed(1)}%`
-                                            : '0%'
-                                      }</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
+  // Helper to flush pipeline after branch misprediction
+  const flushPipeline = (branchIndex, state) => {
+    instructions.forEach((inst, index) => {
+      if (index > branchIndex) {
+        state.delete(inst.id);
+      }
+    });
+  };
+
+  // Reset simulation
+  const reset = () => {
+    setCurrentCycle(1);
+    setMaxCycle(1);
+    setPipelineState(new Map());
+    setStallState(new Map());
+    setOneBitState('NT');
+    setTwoBitState('00');
+    setStats({ correct: 0, incorrect: 0, dataStalls: 0, branchStalls: 0 });
+  };
+
+  // Helper to determine pipeline stage at a given cycle
+  const getStageAtCycle = (instState, cycle) => {
+    if (instState.W === cycle) return 'W';
+    if (instState.M === cycle) return 'M';
+    if (instState.E === cycle) return 'E';
+    if (instState.D === cycle) return 'D';
+    if (instState.F === cycle) return 'F';
+    return '';
+  };
+
+  // Helper to get stage color
+  const getStageColor = (stage, stall) => {
+    if (stall) return 'bg-gray-200';
+    switch (stage) {
+      case 'F': return 'bg-blue-100';
+      case 'D': return 'bg-green-100';
+      case 'E': return 'bg-yellow-100';
+      case 'M': return 'bg-orange-100';
+      case 'W': return 'bg-red-100';
+      default: return '';
+    }
+  };
+
+  return (
+    <div className="w-full max-w-[90rem] mx-auto p-4 md:p-6">
+      <h1 className="text-xl md:text-2xl font-bold mb-4 md:mb-6">Pipeline Stage Visualization with Stalls</h1>
+      
+      {/* Predictor Controls */}
+      <div className="mb-4 md:mb-6 p-3 md:p-4 border rounded bg-gray-50 flex flex-col md:flex-row md:items-center gap-4">
+        <div className="flex items-center gap-4">
+          <span className="font-semibold text-sm md:text-base">Predictor Type:</span>
+          <div className="flex items-center gap-2">
+            <span className={`text-sm md:text-base ${predictorType === 'one-bit' ? 'text-blue-600' : 'text-gray-500'}`}>One-Bit</span>
+            <button
+              onClick={() => setPredictorType(prev => prev === 'one-bit' ? 'two-bit' : 'one-bit')}
+              className="relative inline-flex h-5 md:h-6 w-10 md:w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              style={{
+                backgroundColor: predictorType === 'two-bit' ? '#3B82F6' : '#D1D5DB'
+              }}
+            >
+              <span
+                className={`${
+                  predictorType === 'two-bit' ? 'translate-x-5 md:translate-x-6' : 'translate-x-1'
+                } inline-block h-3 md:h-4 w-3 md:w-4 transform rounded-full bg-white transition-transform`}
+              />
+            </button>
+            <span className={`text-sm md:text-base ${predictorType === 'two-bit' ? 'text-blue-600' : 'text-gray-500'}`}>Two-Bit</span>
+          </div>
         </div>
-    );
+        
+        <div className="flex items-center gap-4">
+          <span className="font-semibold text-sm md:text-base">Current State:</span>
+          {predictorType === 'one-bit' ? (
+            <div className="flex gap-4 text-sm md:text-base">
+              <p>State: {oneBitState}</p>
+              <p>Prediction: {oneBitState}</p>
+            </div>
+          ) : (
+            <div className="flex gap-4 text-sm md:text-base">
+              <p>State: {twoBitState} ({
+                twoBitState === '00' ? 'Strong NT' :
+                twoBitState === '01' ? 'Weak NT' :
+                twoBitState === '10' ? 'Weak T' : 'Strong T'
+              })</p>
+              <p>Prediction: {twoBitState.startsWith('1') ? 'T' : 'NT'}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div className="mb-4 md:mb-6 flex gap-4">
+        <button
+          onClick={step}
+          disabled={isExecutionComplete()}
+          className="px-3 md:px-4 py-2 text-sm md:text-base bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+        >
+          Step Cycle{isExecutionComplete() ? ' (Complete)' : ''}
+        </button>
+        <button
+          onClick={reset}
+          className="px-3 md:px-4 py-2 text-sm md:text-base bg-gray-500 text-white rounded hover:bg-gray-600"
+        >
+          Reset
+        </button>
+      </div>
+
+      {/* Pipeline Visualization */}
+      <div className="mb-4 md:mb-6 overflow-x-auto">
+        <h2 className="text-lg font-semibold mb-2">Pipeline Stages</h2>
+          <table className="w-auto border-collapse text-sm md:text-base whitespace-nowrap">
+            <thead>
+              <tr>
+                <th className="border p-2 md:p-3 w-[18rem]">Instruction</th>
+                <th className="border p-2 md:p-3 w-[10rem]">Comment</th>
+                {[...Array(maxCycle)].map((_, i) => (
+                  <th key={i} className="border p-2 md:p-3 w-8 md:w-12">{i + 1}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {instructions.map(inst => (
+                <tr key={inst.id}>
+                  <td className="border p-2 md:p-3 font-mono whitespace-nowrap max-w-[18rem] overflow-hidden text-ellipsis">{inst.text}</td>
+                  <td className="border p-2 md:p-3 text-xs md:text-sm text-gray-600 max-w-[20rem] overflow-hidden text-ellipsis">{inst.comment || ''}</td>
+                  {[...Array(maxCycle)].map((_, cycle) => {
+                    const instState = pipelineState.get(inst.id) || {};
+                    const stallInfo = stallState.get(inst.id) || {};
+                    const stage = getStageAtCycle(instState, cycle + 1);
+                    const stall = stallInfo[cycle + 1];
+                    
+                    return (
+                      <td 
+                        key={cycle}
+                        className={`border p-1 md:p-2 text-center ${getStageColor(stage, stall)}`}
+                      >
+                        {stall ? `S${stall}` : stage}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+      </div>
+
+      {/* Statistics */}
+      <div className="mb-4 md:mb-6 p-3 md:p-4 border rounded bg-gray-50">
+        <h2 className="text-lg font-semibold mb-2">Statistics</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 text-sm md:text-base">
+          <p>Current Cycle: {currentCycle}</p>
+          <p>Branch Predictions: {stats.correct} correct, {stats.incorrect} incorrect</p>
+          <p>Stalls: {stats.dataStalls} data hazard, {stats.branchStalls} branch misprediction</p>
+          <p>Total Stall Cycles: {stats.dataStalls + stats.branchStalls}</p>
+          <p>Prediction Accuracy: {
+            stats.correct + stats.incorrect > 0 
+              ? ((stats.correct / (stats.correct + stats.incorrect)) * 100).toFixed(1) + '%'
+              : '0%'
+          }</p>
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="mt-4 md:mt-6 p-3 md:p-4 border rounded">
+        <h2 className="text-lg font-semibold mb-2">Legend</h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-sm md:text-base">
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-blue-100 mr-2"></div>
+            <span>Fetch (F)</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-green-100 mr-2"></div>
+            <span>Decode (D)</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-yellow-100 mr-2"></div>
+            <span>Execute (E)</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-orange-100 mr-2"></div>
+            <span>Memory (M)</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-red-100 mr-2"></div>
+            <span>Writeback (W)</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-5 md:w-6 h-5 md:h-6 bg-gray-200 mr-2"></div>
+            <span>Stall (SD/SB)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
-export default BranchPredictionPipeline;
+export default PipelineVisualizer;
